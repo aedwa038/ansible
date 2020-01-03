@@ -30,7 +30,7 @@ DOCUMENTATION = """
         projects:
           description: A list of projects in which to describe GCE instances.
           type: list
-          required: True
+          required: False
         filters:
           description: >
             A list of filter value pairs. Available filters are listed here
@@ -318,6 +318,22 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
                 return True
         return False
 
+    def fetch(self, params, link, query):
+        module = GcpMockModule(params)
+        auth = GcpSession(module, 'cloudresourcemanager')
+        response = auth.get(link, params={'filter': query})
+        return self._return_if_object(module, response)
+
+    def _get_folder_projects (self, config_data, folder):
+        link = 'https://cloudresourcemanager.googleapis.com/v1/projects'.format()
+        query = 'parent.id = {}'.format(folder)
+        projects = []
+        config_data['scopes'] = ['https://www.googleapis.com/auth/cloud-platform']
+        projects_response = self.fetch(config_data, link, query)
+        for item in projects_response['projects']:
+          projects.append(item['name'])
+        return projects
+
     def fetch_list(self, params, link, query):
         """
             :param params: a dict containing all of the fields relevant to build URL
@@ -329,7 +345,12 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
         resp = self._return_if_object(
             self.fake_module, self.auth_session.get(link, params={"filter": query})
         )
+
+        if resp == None or resp.get("items") == None:
+          return self.build_list([])
+
         lists.append(resp.get("items"))
+
         while resp.get("nextPageToken"):
             resp = self._return_if_object(
                 self.fake_module,
@@ -338,7 +359,8 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
                     params={"filter": query, "pageToken": resp.get("nextPageToken")},
                 ),
             )
-            lists.append(resp.get("items"))
+            if resp != None and resp.get("items") != None:
+              lists.append(resp.get("items"))
         return self.build_list(lists)
 
     def build_list(self, lists):
@@ -531,6 +553,20 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
         self.fake_module = GcpMockModule(params)
         self.auth_session = GcpSession(self.fake_module, "compute")
 
+        # get user specifications
+        if 'projects' not in config_data and 'folder' not in config_data:
+          raise AnsibleParserError('Projects must be included in inventory YAML file')
+
+        projects = []
+        if 'projects' in config_data:
+          projects.extend(config_data["projects"])
+
+        if 'folder' in config_data:
+            folder = config_data['folder']
+            for p in self._get_folder_projects(config_data, folder):
+              projects.append(p)
+        
+        config_data["projects"] = projects
         query = self._get_query_options(params["filters"])
 
         if self.get_option("retrieve_image_info"):
@@ -539,6 +575,7 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
             project_disks = None
 
         # Cache logic
+        print(cache)
         if cache:
             cache = self.get_option("cache")
             cache_key = self.get_cache_key(path)
@@ -559,10 +596,9 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
                         )
             except KeyError:
                 cache_needs_update = True
-
         if not cache or cache_needs_update:
             cached_data = {}
-            for project in params["projects"]:
+            for project in projects:
                 cached_data[project] = {}
                 params["project"] = project
                 zones = params["zones"]
